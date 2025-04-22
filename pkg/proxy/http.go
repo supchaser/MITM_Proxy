@@ -12,7 +12,7 @@ import (
 	"strings"
 )
 
-var requestStore = storage.NewRequestStore()
+var requestStore = storage.GlobalRequestStore
 
 func handleHTTP(clientConn net.Conn, method, versionProtocol string, parsedUrl *url.URL, firstRequestLine string, reader *bufio.Reader) {
 	headers := []string{}

@@ -6,6 +6,8 @@ import (
 	"time"
 )
 
+var GlobalRequestStore = NewRequestStore()
+
 type RequestInfo struct {
 	ID        int
 	Method    string
