@@ -100,15 +100,15 @@ func handleHTTPS(clientConn net.Conn, parsedUrl *url.URL, versionProtocol string
 		req.Body.Close()
 
 		// Логируем и сохраняем
-		id := storage.GlobalRequestStore.AddRequest(
-			req.Method,
-			req.URL.String(),
-			req.Header,
-			string(bodyBytes),
-		)
+		id, err := storage.SaveRequest(req, bodyBytes)
+		if err != nil {
+			log.Printf("Error saving HTTPS request #%d: %v", id, err)
+			go io.Copy(rawServerConn, reader)
+			io.Copy(clientConn, rawServerConn)
+			return
+		}
 		log.Printf("[HTTPS] #%d => %s %s", id, req.Method, req.URL.String())
 
-		// **ВАЖНО**: задаём схему и хост, иначе RoundTrip не знает, куда шлёть
 		req.URL.Scheme = "https"
 		req.URL.Host = parsedUrl.Host
 		req.Host = parsedUrl.Host

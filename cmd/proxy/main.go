@@ -4,11 +4,17 @@ import (
 	"MITM_PROXY/pkg/api"
 	"MITM_PROXY/pkg/cert"
 	"MITM_PROXY/pkg/proxy"
+	"MITM_PROXY/pkg/storage"
 	"log"
 	"net"
 )
 
 func main() {
+	dsn := "postgres://user:pass@localhost:5432/mitm?sslmode=disable"
+	if err := storage.Init(dsn); err != nil {
+		log.Fatalf("DB init failed: %v", err)
+	}
+
 	if err := cert.LoadCA("./certs"); err != nil {
 		log.Println("WARNING: cannot load CA. HTTPS MITM won't work properly. Error:", err)
 	}

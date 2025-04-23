@@ -1,0 +1,54 @@
+services:
+  # Сервис для PostgreSQL
+  db:
+    image: postgres:latest
+    container_name: mitm-proxy-db
+    environment:
+      POSTGRES_USER: mitm
+      POSTGRES_PASSWORD: mitm_password
+      POSTGRES_DB: mitm_db
+    volumes:
+      - pg_data:/var/lib/postgresql/data 
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - mitm-network
+    ports:
+      - "5432:5432"
+
+  mitm-proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mitm-proxy
+    depends_on:
+      - db 
+    environment:
+      - DATABASE_URL=postgres://mitm:mitm_password@db:5432/mitm_db?sslmode=disable 
+    networks:
+      - mitm-network
+    ports:
+      - "8080:8080"
+      - "8000:8000"
+    volumes:
+      - ./certs:/app/certs
+
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80" 
+    depends_on:
+      - db
+    networks:
+      - mitm-network
+
+networks:
+  mitm-network:
+    driver: bridge
+
+volumes:
+  pg_data:
+    driver: local

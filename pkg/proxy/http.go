@@ -3,6 +3,7 @@ package proxy
 import (
 	"MITM_PROXY/pkg/storage"
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"log"
@@ -11,8 +12,6 @@ import (
 	"net/url"
 	"strings"
 )
-
-var requestStore = storage.GlobalRequestStore
 
 func handleHTTP(clientConn net.Conn, method, versionProtocol string, parsedUrl *url.URL, firstRequestLine string, reader *bufio.Reader) {
 	headers := []string{}
@@ -27,6 +26,7 @@ func handleHTTP(clientConn net.Conn, method, versionProtocol string, parsedUrl *
 	var bodyBuilder strings.Builder
 	finalHeaders := make(http.Header)
 
+	// Read headers
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
@@ -52,6 +52,7 @@ func handleHTTP(clientConn net.Conn, method, versionProtocol string, parsedUrl *
 		}
 	}
 
+	// Read body if present
 	var contentLength int64 = 0
 	if cl := finalHeaders.Get("Content-Length"); cl != "" {
 		fmt.Sscanf(cl, "%d", &contentLength)
@@ -68,10 +69,25 @@ func handleHTTP(clientConn net.Conn, method, versionProtocol string, parsedUrl *
 		bodyBuilder.Write(bodyData)
 	}
 
-	fullURL := parsedUrl.String()
-	id := requestStore.AddRequest(method, fullURL, finalHeaders, bodyBuilder.String())
-	log.Printf("[HTTP] #%d => %s %s", id, method, fullURL)
+	// Create http.Request object
+	req := &http.Request{
+		Method: method,
+		URL:    parsedUrl,
+		Proto:  versionProtocol,
+		Header: finalHeaders,
+		Body:   io.NopCloser(bytes.NewReader(bodyData)),
+		Host:   parsedUrl.Host,
+	}
 
+	// Save the request
+	id, err := storage.SaveRequest(req, bodyData)
+	if err != nil {
+		log.Printf("Error saving request: %v", err)
+		return
+	}
+	log.Printf("[HTTP] #%d => %s %s", id, method, parsedUrl.String())
+
+	// Connect to target server
 	host := parsedUrl.Host
 	if !strings.Contains(host, ":") {
 		host += ":80"
@@ -84,15 +100,18 @@ func handleHTTP(clientConn net.Conn, method, versionProtocol string, parsedUrl *
 	}
 	defer serverConn.Close()
 
+	// Write headers to server
 	for _, h := range headers {
 		_, _ = serverConn.Write([]byte(h))
 	}
-
 	serverConn.Write([]byte("\r\n"))
+
+	// Write body if present
 	if len(bodyData) > 0 {
 		serverConn.Write(bodyData)
 	}
 
+	// Proxy the connection
 	go io.Copy(clientConn, serverConn)
 	io.Copy(serverConn, reader)
 }

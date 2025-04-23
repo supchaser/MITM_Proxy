@@ -1,12 +1,14 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
+
+	"MITM_PROXY/pkg/storage"
 )
 
 func getAllRequests(w http.ResponseWriter, r *http.Request) {
@@ -14,8 +16,15 @@ func getAllRequests(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Only GET allowed", http.StatusMethodNotAllowed)
 		return
 	}
+
+	requests, err := storage.GetAllRequests()
+	if err != nil {
+		http.Error(w, "Failed to get requests", http.StatusInternalServerError)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(requestStore.GetAllRequests())
+	json.NewEncoder(w).Encode(requests)
 }
 
 func getRequestByID(w http.ResponseWriter, r *http.Request) {
@@ -36,11 +45,13 @@ func getRequestByID(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Bad request ID", http.StatusBadRequest)
 		return
 	}
-	reqInfo := requestStore.GetRequestByID(id)
-	if reqInfo == nil {
+
+	reqInfo, err := storage.GetRequestByID(id)
+	if err != nil || reqInfo == nil {
 		http.Error(w, "Not found", http.StatusNotFound)
 		return
 	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(reqInfo)
 }
@@ -50,11 +61,13 @@ func repeatRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Only POST allowed", http.StatusMethodNotAllowed)
 		return
 	}
+
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/repeat/"), "/")
 	if len(parts) < 1 || parts[0] == "" {
 		http.Error(w, "Bad request ID", http.StatusBadRequest)
 		return
 	}
+
 	idStr := parts[0]
 	var id int
 	_, err := fmt.Sscanf(idStr, "%d", &id)
@@ -62,47 +75,57 @@ func repeatRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Bad request ID", http.StatusBadRequest)
 		return
 	}
-	reqInfo := requestStore.GetRequestByID(id)
-	if reqInfo == nil {
+
+	// Get the original request
+	req, err := storage.GetRequestByID(id)
+	if err != nil || req == nil {
 		http.Error(w, "Not found", http.StatusNotFound)
 		return
 	}
 
-	parsed, err := url.Parse(reqInfo.URL)
-	if err != nil {
-		http.Error(w, "Cannot parse URL", http.StatusBadRequest)
-		return
-	}
-
-	newReq, err := http.NewRequest(reqInfo.Method, reqInfo.URL, strings.NewReader(reqInfo.Body))
-	if err != nil {
-		http.Error(w, "Cannot create request", http.StatusInternalServerError)
-		return
-	}
-
-	for k, vals := range reqInfo.Headers {
-		for _, v := range vals {
-			newReq.Header.Add(k, v)
+	// Read the original request body
+	var bodyBytes []byte
+	if req.Body != nil {
+		bodyBytes, err = io.ReadAll(req.Body)
+		if err != nil {
+			http.Error(w, "Failed to read request body", http.StatusInternalServerError)
+			return
 		}
+		req.Body = io.NopCloser(bytes.NewReader(bodyBytes)) // Reset body reader
 	}
 
+	// Create a new request
 	client := &http.Client{}
+	newReq, err := http.NewRequest(req.Method, req.URL.String(), bytes.NewReader(bodyBytes))
+	if err != nil {
+		http.Error(w, "Failed to create request", http.StatusInternalServerError)
+		return
+	}
+
+	// Copy headers
+	for k, v := range req.Header {
+		newReq.Header[k] = v
+	}
+
+	// Send the request
 	resp, err := client.Do(newReq)
 	if err != nil {
-		http.Error(w, "Error repeating request: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("Failed to send request: %v", err), http.StatusInternalServerError)
 		return
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
-	w.Header().Set("Content-Type", "application/json")
+	// Read the response
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		http.Error(w, "Failed to read response", http.StatusInternalServerError)
+		return
+	}
 
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":  resp.Status,
-		"headers": resp.Header,
-		"body":    string(respBody),
-		"url":     parsed.String(),
-	})
+	// Return the response
+	w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
+	w.WriteHeader(resp.StatusCode)
+	w.Write(respBody)
 }
 
 func scanRequest(w http.ResponseWriter, r *http.Request) {
@@ -110,11 +133,13 @@ func scanRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Only POST allowed", http.StatusMethodNotAllowed)
 		return
 	}
+
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/scan/"), "/")
 	if len(parts) < 1 || parts[0] == "" {
 		http.Error(w, "Bad request ID", http.StatusBadRequest)
 		return
 	}
+
 	idStr := parts[0]
 	var id int
 	_, err := fmt.Sscanf(idStr, "%d", &id)
@@ -122,27 +147,52 @@ func scanRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Bad request ID", http.StatusBadRequest)
 		return
 	}
-	reqInfo := requestStore.GetRequestByID(id)
-	if reqInfo == nil {
+
+	// Get the original request
+	req, err := storage.GetRequestByID(id)
+	if err != nil || req == nil {
 		http.Error(w, "Not found", http.StatusNotFound)
 		return
 	}
-	suspicious := []string{"UNION SELECT", "DROP", "alert(", "<script>", "admin' --"}
-	found := []string{}
-	for _, s := range suspicious {
-		if strings.Contains(strings.ToUpper(reqInfo.Body), strings.ToUpper(s)) {
-			found = append(found, s)
+
+	// Perform basic security checks
+	issues := make([]string, 0)
+
+	// Check for SQL injection patterns in URL parameters
+	for _, values := range req.URL.Query() {
+		for _, value := range values {
+			if strings.Contains(strings.ToLower(value), "select ") ||
+				strings.Contains(strings.ToLower(value), "insert ") ||
+				strings.Contains(strings.ToLower(value), "update ") ||
+				strings.Contains(strings.ToLower(value), "delete ") {
+				issues = append(issues, "Possible SQL injection in URL parameters")
+				break
+			}
 		}
 	}
-	w.Header().Set("Content-Type", "application/json")
-	if len(found) == 0 {
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"message": "No obvious injection patterns found",
-		})
-	} else {
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"message": "Potentially dangerous substrings found",
-			"found":   found,
-		})
+
+	// Check for XSS patterns
+	bodyBytes, err := io.ReadAll(req.Body)
+	if err == nil {
+		req.Body = io.NopCloser(bytes.NewReader(bodyBytes)) // Reset body reader
+		bodyStr := string(bodyBytes)
+		if strings.Contains(bodyStr, "<script>") || strings.Contains(bodyStr, "javascript:") {
+			issues = append(issues, "Possible XSS in request body")
+		}
 	}
+
+	// Check for sensitive headers
+	if req.Header.Get("Authorization") != "" || req.Header.Get("Cookie") != "" {
+		issues = append(issues, "Request contains sensitive headers")
+	}
+
+	if len(issues) == 0 {
+		issues = append(issues, "No obvious security issues found")
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"id":     id,
+		"issues": issues,
+	})
 }
